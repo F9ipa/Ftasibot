@@ -1,4 +1,3 @@
-import logging
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -9,7 +8,7 @@ import concurrent.futures
 # التوكن الخاص بك
 TOKEN = "7408760983:AAGroYZzwSx6Ly8LwB3fYtZWcmLiN2gkK2U"
 
-# قائمة رموز تاسي
+# قائمة رموز تاسي (مختصرة هنا، تأكد من وجود القائمة الكاملة في ملفك)
 TASI_SYMBOLS = [
     '1010.SR', '1020.SR', '1030.SR', '1050.SR', '1060.SR', '1080.SR', '1111.SR', '1120.SR', '1140.SR', '1150.SR',
     '1180.SR', '1182.SR', '1183.SR', '1201.SR', '1202.SR', '1210.SR', '1211.SR', '1212.SR', '1213.SR', '1214.SR',
@@ -35,32 +34,21 @@ TASI_SYMBOLS = [
     '8230.SR', '8240.SR', '8250.SR', '8260.SR', '8270.SR', '8280.SR', '8300.SR', '8310.SR', '8311.SR', '8312.SR'
 ]
 
-# دالة تحويل البيانات إلى شموع Heikin-Ashi
 def get_heikin_ashi(df):
     ha_df = df.copy()
-    # Close = (Open + High + Low + Close) / 4
     ha_df['Close'] = (df['Open'] + df['High'] + df['Low'] + df['Close']) / 4
-    
-    # Open = (Open_prev + Close_prev) / 2
     ha_open = np.zeros(len(df))
     ha_open[0] = (df['Open'].iloc[0] + df['Close'].iloc[0]) / 2
     for i in range(1, len(df)):
         ha_open[i] = (ha_open[i-1] + ha_df['Close'].iloc[i-1]) / 2
     ha_df['Open'] = ha_open
-    
-    # High = Max(High, Open, Close)
     ha_df['High'] = ha_df[['High', 'Open', 'Close']].max(axis=1)
-    # Low = Min(Low, Open, Close)
     ha_df['Low'] = ha_df[['Low', 'Open', 'Close']].min(axis=1)
-    
     return ha_df
 
-# منطق مؤشر WaveTrend [LazyBear]
 def calculate_wavetrend(df):
     if len(df) < 30: return None, None
-    # استخدام بيانات Heikin-Ashi بدلاً من العادية
     ha_df = get_heikin_ashi(df)
-    
     ap = (ha_df['High'] + ha_df['Low'] + ha_df['Close']) / 3
     esa = ap.ewm(span=10, adjust=False).mean()
     d = (ap - esa).abs().ewm(span=10, adjust=False).mean()
@@ -73,44 +61,47 @@ def get_signals():
     pos, neg = [], []
     def scan(sym):
         try:
-            # الفاصل شهري interval="1mo"
+            # جلب البيانات الشهرية
             df = yf.download(sym, period="5y", interval="1mo", progress=False)
             if df.empty or len(df) < 10: return
+            
+            # --- التعديل هنا: تجاهل آخر شمعة (الشهر الحالي) ---
+            # نقوم بحذف السطر الأخير من البيانات لضمان الحساب على الإغلاقات المكتملة فقط
+            df = df.iloc[:-1] 
             
             wt1, wt2 = calculate_wavetrend(df)
             if wt1 is None: return
             
+            # القيم عند آخر إغلاق شهري مكتمل
             c1, p1 = wt1.iloc[-1], wt1.iloc[-2]
             c2, p2 = wt2.iloc[-1], wt2.iloc[-2]
             
             name = sym.replace(".SR", "")
-            current_price = f"{df['Close'].iloc[-1]:.2f}"
+            # سعر الإغلاق للشهر المكتمل
+            closed_price = f"{df['Close'].iloc[-1]:.2f}"
+            month_name = df.index[-1].strftime('%B %Y') # اسم الشهر المغلق
             
-            # تقاطع إيجابي (دخول)
             if p1 <= p2 and c1 > c2:
-                pos.append(f"🟢 {name} - السعر: {current_price}")
-            # تقاطع سلبي (خروج)
+                pos.append(f"🟢 {name} (إغلاق {month_name}: {closed_price})")
             elif p1 >= p2 and c1 < c2:
-                neg.append(f"🔴 {name} - السعر: {current_price}")
-        except Exception: pass
+                neg.append(f"🔴 {name} (إغلاق {month_name}: {closed_price})")
+        except: pass
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as ex:
         ex.map(scan, TASI_SYMBOLS)
     
     return sorted(pos), sorted(neg)
 
-# واجهة البوت
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("📈 استخراج الإيجابية (دخول)", callback_data='pos')],
-        [InlineKeyboardButton("📉 استخراج السلبية (خروج)", callback_data='neg')]
+        [InlineKeyboardButton("📈 إيجابية الشهر السابق", callback_data='pos')],
+        [InlineKeyboardButton("📉 سلبية الشهر السابق", callback_data='neg')]
     ]
     await update.message.reply_text(
-        "📊 **بوت فحص تاسي - WaveTrend Heikin-Ashi**\n\n"
-        "• الفاصل: شهري 🗓\n"
-        "• الشموع: هايكين آشي 🕯\n"
-        "• المصدر: ياهو فاينانس 📡\n\n"
-        "اختر العملية المطلوبة:",
+        "📊 **رادار تاسي - نظام الإغلاقات الشهرية المكتملة**\n\n"
+        "هذا البوت يحلل التقاطعات بناءً على **آخر شمعة شهرية أغلقت فقط**.\n"
+        "• الشموع: Heikin-Ashi 🕯\n"
+        "• المؤشر: WaveTrend 🌊\n",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown"
     )
@@ -119,37 +110,26 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    choice = query.data
-    if choice == 'main':
-        kb = [[InlineKeyboardButton("📈 استخراج الإيجابية", callback_data='pos')],
-              [InlineKeyboardButton("📉 استخراج السلبية", callback_data='neg')]]
-        await query.edit_message_text("اختر الفلتر المطلوب (Heikin-Ashi):", reply_markup=InlineKeyboardMarkup(kb))
+    if query.data == 'main':
+        kb = [[InlineKeyboardButton("📈 إيجابية الشهر السابق", callback_data='pos')],
+              [InlineKeyboardButton("📉 سلبية الشهر السابق", callback_data='neg')]]
+        await query.edit_message_text("اختر الفلتر (إغلاقات شهرية مكتملة):", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    await query.edit_message_text("⏳ جاري تحليل السوق السعودي بالكامل... فضلاً انتظر.")
-    
+    await query.edit_message_text("🔍 جاري تحليل الإغلاقات الشهرية المكتملة... يرجى الانتظار.")
     pos, neg = get_signals()
     
-    if choice == 'pos':
-        title = "✅ **الأسهم الإيجابية (تقاطع دخول شهري):**"
-        results = pos if pos else ["لا توجد تقاطعات إيجابية حالياً."]
-    else:
-        title = "❌ **الأسهم السلبية (تقاطع خروج شهري):**"
-        results = neg if neg else ["لا توجد تقاطعات سلبية حالياً."]
+    res = pos if query.data == 'pos' else neg
+    title = "✅ **نتائج الدخول (آخر إغلاق شهري):**" if query.data == 'pos' else "❌ **نتائج الخروج (آخر إغلاق شهري):**"
     
-    message = f"{title}\n\n" + "\n".join(results)
+    msg = f"{title}\n\n" + ("\n".join(res) if res else "لا توجد تقاطعات جديدة في الإغلاق الأخير.")
+    if len(msg) > 4000: msg = msg[:4000] + "\n...(القائمة طويلة)"
     
-    # تقسيم الرسالة إذا كانت طويلة جداً
-    if len(message) > 4000:
-        message = message[:4000] + "\n...(القائمة طويلة)"
-    
-    kb = [[InlineKeyboardButton("🔙 العودة للقائمة", callback_data='main')]]
-    await query.message.reply_text(message, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    kb = [[InlineKeyboardButton("🔙 عودة", callback_data='main')]]
+    await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
 if __name__ == "__main__":
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_button))
-    
-    print("البوت يعمل بنجاح...")
     application.run_polling()
